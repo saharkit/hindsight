@@ -3519,7 +3519,7 @@ class HindsightConfig:
     """Configuration container for Hindsight API."""
 
     # Database
-    database_backend: Literal["postgresql", "oracle"]
+    database_backend: str
     database_url: str
     # Optional read-replica URL for recall queries. When set, the engine opens
     # a second pool and routes recall SELECTs through it.
@@ -4691,6 +4691,9 @@ class HindsightConfig:
 
     def validate(self) -> None:
         """Validate configuration values and raise errors for invalid combinations."""
+        from hindsight_api.engine.db.registry import validate_backend_name
+
+        validate_backend_name(self.database_backend)
         for operation in DECISION_MODEL_OPERATIONS:
             self.decision_model_config(operation)  # raises on an unknown provider or a missing key
         # Validate vector_extension
@@ -4942,14 +4945,11 @@ class HindsightConfig:
             ENV_LLM_TEMPERATURE_CONSOLIDATION, DEFAULT_LLM_TEMPERATURE_CONSOLIDATION
         )
 
+        from hindsight_api.engine.db.registry import validate_backend_name
+
         config = cls(
             # Database
-            # `.lower()` returns a plain `str`; the field declares the two backends it accepts,
-            # and an unknown value is rejected by that field rather than here.
-            database_backend=cast(
-                'Literal["postgresql", "oracle"]',
-                os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
-            ),
+            database_backend=validate_backend_name(os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower()),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
             read_database_url=os.getenv(ENV_READ_DATABASE_URL) or None,
             read_db_pool_min_size=int(os.getenv(ENV_READ_DB_POOL_MIN_SIZE, str(DEFAULT_DB_POOL_MIN_SIZE))),

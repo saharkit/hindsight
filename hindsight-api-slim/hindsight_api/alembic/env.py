@@ -24,6 +24,7 @@ from sqlalchemy import Connection, engine_from_config, pool
 from sqlalchemy.engine import Engine
 
 from hindsight_api.db_url import is_oracle_url, to_libpq_url
+from hindsight_api.engine.db.registry import resolve_provider
 from hindsight_api.models import Base
 
 
@@ -43,6 +44,13 @@ load_env()
 
 config = context.config
 target_metadata = Base.metadata
+
+selected_backend = (
+    config.get_main_option("hindsight_backend") or os.getenv("HINDSIGHT_API_DATABASE_BACKEND", "postgresql").lower()
+)
+selected_provider = resolve_provider(selected_backend)
+config.set_main_option("hindsight_backend", selected_backend)
+config.set_main_option("hindsight_migration_dialect", selected_provider.migration_dialect)
 
 
 def _normalize_oracle_url(url: str) -> str:
@@ -91,7 +99,7 @@ def get_database_url() -> str:
 
     if is_oracle_url(database_url):
         database_url = _normalize_oracle_url(database_url)
-    else:
+    elif selected_backend == "postgresql":
         # PG: convert SQLAlchemy-style asyncpg URLs and ?ssl= params to libpq form
         # for the sync engine used during migrations.
         database_url = to_libpq_url(database_url)
@@ -160,7 +168,7 @@ def run_migrations_online() -> None:
     with connectable.connect() as connection:
         if is_oracle:
             _configure_oracle_session(connection, target_schema)
-        else:
+        elif selected_backend == "postgresql":
             _configure_pg_session(connectable, connection, target_schema)
             if target_schema:
                 from hindsight_api.alembic._new_schema_indexes import (
