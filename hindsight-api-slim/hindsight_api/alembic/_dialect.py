@@ -1,42 +1,49 @@
-"""Dialect dispatcher for Alembic migrations.
+"""Dispatch revision callbacks using the selected provider's migration contract."""
 
-Each migration file declares a ``_pg_upgrade``/``_oracle_upgrade`` (and matching
-downgrades) function and routes ``upgrade()``/``downgrade()`` through
-``run_for_dialect``. The helper inspects the live connection's dialect name and
-runs the matching function — or no-ops if the migration doesn't apply to the
-current backend.
-
-Use ``None`` (or omit the kwarg) when a migration intentionally has no effect
-on a dialect; the helper treats it as a no-op.
-"""
-
-from __future__ import annotations
-
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from alembic import op
 
+from hindsight_api.engine.db.registry import resolve_provider
+
 DialectFn = Callable[[], None]
-_SUPPORTED = ("postgresql", "oracle")
+
+
+class MigrationDialectError(RuntimeError):
+    """The migration dialect or its revision callback is not registered."""
 
 
 def run_for_dialect(
     *,
     pg: DialectFn | None = None,
     oracle: DialectFn | None = None,
+    external: Mapping[str, DialectFn | None] | None = None,
 ) -> None:
-    """Dispatch to the function matching the current bind's dialect.
-
-    Args:
-        pg: Function to run when the active bind is PostgreSQL.
-        oracle: Function to run when the active bind is Oracle.
-
-    Unrecognized dialects raise; an explicit ``None`` for the active dialect
-    is a no-op (the migration deliberately does nothing here).
-    """
-    name = op.get_bind().dialect.name
-    if name not in _SUPPORTED:
-        raise RuntimeError(f"Unsupported dialect for migration dispatch: {name!r}. Expected one of {_SUPPORTED}.")
-    fn = {"postgresql": pg, "oracle": oracle}[name]
+    """Run the active dialect's callback, refusing implicit external no-ops."""
+    live = op.get_bind().dialect.name
+    config = op.get_context().config
+    selected = config.get_main_option("hindsight_backend") if config else None
+    declared = config.get_main_option("hindsight_migration_dialect") if config else None
+    provider = None
+    if selected is not None:
+        try:
+            provider = resolve_provider(selected)
+        except ValueError:
+            raise MigrationDialectError("Invalid selected migration provider") from None
+        if declared != provider.migration_dialect:
+            raise MigrationDialectError("Migration dialect disagrees with selected provider")
+    if declared is not None and declared != live:
+        raise MigrationDialectError("Migration dialect disagrees with SQLAlchemy dialect")
+    name = declared if declared is not None else live
+    if name not in ("postgresql", "oracle") and (provider is None or name != provider.migration_dialect):
+        raise MigrationDialectError("Unregistered migration dialect")
+    if selected and selected not in ("postgresql", "oracle"):
+        if provider.migration_mode != "alembic":
+            raise MigrationDialectError("Backend-owned migrations cannot run Alembic revisions")
+        if external is None or name not in external:
+            raise MigrationDialectError("Missing external migration callback")
+        fn = external[name]
+    else:
+        fn = {"postgresql": pg, "oracle": oracle}.get(name)
     if fn is not None:
         fn()

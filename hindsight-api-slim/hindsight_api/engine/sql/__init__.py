@@ -30,12 +30,10 @@ def create_sql_dialect(backend_type: str) -> SQLDialect:
     Raises:
         ValueError: If backend_type is not recognized.
     """
-    if backend_type == "postgresql":
-        from .postgresql import PostgreSQLDialect
+    from ..db.registry import BackendRegistrationError, resolve_provider
 
-        return PostgreSQLDialect()
-    elif backend_type == "oracle":
-        from .oracle import OracleDialect
-
-        return OracleDialect()
-    raise ValueError(f"Unknown SQL dialect: {backend_type!r}. Supported dialects: 'postgresql', 'oracle'.")
+    try:
+        provider = resolve_provider(backend_type)
+    except BackendRegistrationError as exc:
+        raise BackendRegistrationError(f"Unknown SQL dialect: {exc}") from None
+    return provider.dialect_factory()

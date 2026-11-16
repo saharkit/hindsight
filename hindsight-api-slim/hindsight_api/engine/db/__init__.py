@@ -14,9 +14,11 @@ Usage:
 
 from .base import DatabaseBackend, DatabaseConnection
 from .ops import DataAccessOps
+from .registry import BackendProviderV1, resolve_provider
 from .result import ResultRow
 
 __all__ = [
+    "BackendProviderV1",
     "DataAccessOps",
     "DatabaseBackend",
     "DatabaseConnection",
@@ -24,32 +26,6 @@ __all__ = [
     "create_data_access_ops",
     "create_database_backend",
 ]
-
-
-def _get_backend_class(backend_type: str) -> type[DatabaseBackend]:
-    """Resolve backend class by name using lazy imports."""
-    if backend_type == "postgresql":
-        from .postgresql import PostgreSQLBackend
-
-        return PostgreSQLBackend
-    if backend_type == "oracle":
-        from .oracle import OracleBackend
-
-        return OracleBackend
-    raise ValueError(f"Unknown database backend: {backend_type!r}. Supported: 'postgresql', 'oracle'.")
-
-
-def _get_ops_class(backend_type: str) -> type[DataAccessOps]:
-    """Resolve ops class by name using lazy imports."""
-    if backend_type == "postgresql":
-        from .ops_postgresql import PostgreSQLOps
-
-        return PostgreSQLOps
-    if backend_type == "oracle":
-        from .ops_oracle import OracleOps
-
-        return OracleOps
-    raise ValueError(f"Unknown data access ops: {backend_type!r}. Supported: 'postgresql', 'oracle'.")
 
 
 def create_database_backend(backend_type: str) -> DatabaseBackend:
@@ -64,7 +40,7 @@ def create_database_backend(backend_type: str) -> DatabaseBackend:
     Raises:
         ValueError: If backend_type is not recognized.
     """
-    return _get_backend_class(backend_type)()
+    return resolve_provider(backend_type).backend_factory()
 
 
 _OPS_CACHE: dict[str, DataAccessOps] = {}
@@ -89,6 +65,6 @@ def create_data_access_ops(backend_type: str) -> DataAccessOps:
     """
     ops = _OPS_CACHE.get(backend_type)
     if ops is None:
-        ops = _get_ops_class(backend_type)()
+        ops = resolve_provider(backend_type).ops_factory()
         _OPS_CACHE[backend_type] = ops
     return ops
