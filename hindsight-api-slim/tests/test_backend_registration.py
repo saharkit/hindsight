@@ -262,3 +262,136 @@ async def test_backend_mode_bypass_off_event_loop_completion_and_failure(install
         ("sample", "sample-dsn", "b"),
         ("sample", "sample-dsn", None),
     ]
+
+
+def test_external_alembic_runner_configuration(installed_provider, monkeypatch, tmp_path):
+    """Observe the real runner and execute an isolated offline revision."""
+    from pathlib import Path
+
+    from alembic import command
+
+    from hindsight_api.engine.db import provider_migrations
+
+    monkeypatch.setitem(
+        registry._PROVIDERS, "sample", replace(installed_provider, migration_mode="alembic", migration_dialect="sqlite")
+    )
+    scripts = tmp_path / "revision_fixture"
+    (scripts / "versions").mkdir(parents=True)
+    (scripts / "env.py").write_text(
+        'from alembic import context\n'
+        'context.configure(dialect_name="sqlite", as_sql=True)\n'
+        'with context.begin_transaction():\n'
+        '    context.run_migrations()\n'
+    )
+    marker = tmp_path / "invoked"
+    (scripts / "versions" / "fixture.py").write_text(
+        'from pathlib import Path\n'
+        'from hindsight_api.alembic._dialect import run_for_dialect\n'
+        'revision = "fixture"\ndown_revision = None\n'
+        f'_EXTERNAL_UPGRADE = {{"sqlite": lambda: Path({str(marker)!r}).write_text("upgrade")}}\n'
+        '_EXTERNAL_DOWNGRADE = {"sqlite": None}\n'
+        'def upgrade():\n    run_for_dialect(external=_EXTERNAL_UPGRADE)\n'
+        'def downgrade():\n    run_for_dialect(external=_EXTERNAL_DOWNGRADE)\n'
+    )
+    dsn = "sqlite:///sample%2Fname%25.db"
+    real_upgrade = command.upgrade
+    observed = []
+
+    def upgrade(config, revision):
+        assert Path(config.get_main_option("script_location")) == Path(provider_migrations.__file__).parents[2] / "alembic"
+        assert config.get_main_option("hindsight_backend") == "sample"
+        assert config.get_main_option("hindsight_migration_dialect") == "sqlite"
+        assert config.get_main_option("sqlalchemy.url") == dsn
+        assert revision == "heads"
+        observed.append(config.get_main_option("target_schema"))
+        # Only redirect the revision tree after observing the product configuration.
+        config.set_main_option("script_location", str(scripts))
+        real_upgrade(config, revision)
+        assert marker.read_text() == "upgrade"
+        marker.unlink()
+
+    monkeypatch.setattr(command, "upgrade", upgrade)
+    provider_migrations._run_alembic("sample", dsn, "tenant_a")
+    provider_migrations._run_alembic("sample", dsn, None)
+    assert observed == ["tenant_a", None]
+
+
+@pytest.mark.asyncio
+async def test_external_provider_initialization_migrates_before_connect(installed_provider, monkeypatch):
+    """Startup must await external migrations before attempting a connection."""
+    from unittest.mock import AsyncMock, Mock
+
+    from hindsight_api.engine import memory_engine
+    from hindsight_api.engine.db import provider_migrations
+    from hindsight_api.engine import memories
+
+    class ConnectionReached(Exception):
+        """Stop startup at the connection boundary without creating a database."""
+
+    monkeypatch.setattr(memories, "get_memories", lambda: SimpleNamespace(initialize=AsyncMock()))
+    monkeypatch.setattr(memories, "set_bank_gone_check", Mock())
+    monkeypatch.setattr(memory_engine, "get_config", lambda: SimpleNamespace(model_init_timeout=5, text_search_extension="native"))
+    loop_thread = threading.get_ident()
+
+    for mode, fail in (("backend", False), ("backend", True), ("alembic", False)):
+        monkeypatch.setitem(registry._PROVIDERS, "sample", replace(installed_provider, migration_mode=mode))
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+        connected = []
+        calls = []
+        backend = create_database_backend("sample")
+
+        def migrate(dsn, *, schema=None):
+            assert threading.get_ident() != loop_thread
+            assert dsn == "sample-dsn"
+            calls.append(schema)
+            entered.set()
+            assert release.wait(5), "test did not release migration"
+            if fail:
+                raise RuntimeError("startup migration failed")
+            completed.set()
+
+        def alembic(name, dsn, schema):
+            assert mode == "alembic", "backend mode fell back to Alembic"
+            assert name == "sample"
+            migrate(dsn, schema=schema)
+
+        async def connect(*args, **kwargs):
+            assert completed.is_set()
+            connected.append(True)
+            raise ConnectionReached
+
+        monkeypatch.setattr(backend, "run_migrations", migrate)
+        monkeypatch.setattr(backend, "initialize", connect)
+        monkeypatch.setattr(provider_migrations, "_run_alembic", alembic)
+        engine = memory_engine.MemoryEngine.__new__(memory_engine.MemoryEngine)
+        engine._initialized = False
+        engine._llm_request_extension = engine._model_call_extension = None
+        engine._use_pg0 = False
+        engine._skip_llm_verification = True
+        engine._run_migrations = True
+        engine._database_backend_type = "sample"
+        engine._backend = backend
+        engine.db_url = "sample-dsn"
+        engine.embeddings = SimpleNamespace(provider_name="fixture", initialize=AsyncMock())
+        engine.query_analyzer = SimpleNamespace(load=Mock())
+        engine._cross_encoder_reranker = SimpleNamespace(cross_encoder=SimpleNamespace(initialize=AsyncMock()), fallback=None)
+        engine._tenant_extension = SimpleNamespace(list_tenants=AsyncMock(return_value=[]))
+        engine._db_statement_timeout = 0
+        engine._db_max_parallel_workers_per_gather = None
+        engine._entity_trgm_probe_threshold = 0.3
+        engine._pool_min_size = engine._pool_max_size = 1
+        engine._db_command_timeout = engine._db_acquire_timeout = 5
+        task = asyncio.create_task(engine.initialize())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert not task.done()
+            assert not connected
+        finally:
+            release.set()
+            expected = RuntimeError if fail else ConnectionReached
+            with pytest.raises(expected):
+                await asyncio.wait_for(task, 5)
+        assert calls == [None]
+        assert connected == ([] if fail else [True])
