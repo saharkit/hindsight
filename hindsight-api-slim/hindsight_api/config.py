@@ -4691,9 +4691,7 @@ class HindsightConfig:
 
     def validate(self) -> None:
         """Validate configuration values and raise errors for invalid combinations."""
-        from hindsight_api.engine.db.registry import validate_backend_name
-
-        validate_backend_name(self.database_backend)
+        _validate_database_backend(self.database_backend)
         for operation in DECISION_MODEL_OPERATIONS:
             self.decision_model_config(operation)  # raises on an unknown provider or a missing key
         # Validate vector_extension
@@ -4945,11 +4943,11 @@ class HindsightConfig:
             ENV_LLM_TEMPERATURE_CONSOLIDATION, DEFAULT_LLM_TEMPERATURE_CONSOLIDATION
         )
 
-        from hindsight_api.engine.db.registry import validate_backend_name
-
         config = cls(
             # Database
-            database_backend=validate_backend_name(os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower()),
+            database_backend=_validate_database_backend(
+                os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower()
+            ),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
             read_database_url=os.getenv(ENV_READ_DATABASE_URL) or None,
             read_db_pool_min_size=int(os.getenv(ENV_READ_DB_POOL_MIN_SIZE, str(DEFAULT_DB_POOL_MIN_SIZE))),
@@ -6521,6 +6519,25 @@ def get_config() -> StaticConfigProxy:
         ConfigFieldAccessError: If you try to access a bank-configurable field
     """
     return StaticConfigProxy(_get_raw_config())
+
+
+_BUILTIN_DATABASE_BACKENDS = frozenset({"postgresql", "oracle"})
+
+
+def _validate_database_backend(name: str) -> str:
+    """Validate a configured backend name without loading the engine for a built-in.
+
+    Built-in names need no provider load, and importing the registry imports the
+    ``hindsight_api.engine`` package into every config build (#5479,
+    tests/test_config_import_cost.py). A non-built-in name is resolved through the
+    registry here, so an unknown or invalid provider still refuses at configuration
+    time; the factories resolve every name, built-ins included, through the same registry.
+    """
+    if name in _BUILTIN_DATABASE_BACKENDS:
+        return name
+    from hindsight_api.engine.db.registry import validate_backend_name
+
+    return validate_backend_name(name)
 
 
 def _get_raw_config() -> HindsightConfig:
