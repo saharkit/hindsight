@@ -52,3 +52,10 @@ Only the selected external factory is loaded; a broken unselected package does
 not prevent built-in startup. Invalid descriptors and incompatible API versions
 are refused before database initialization. No third-party database driver is
 included with this registration interface.
+
+Run the registration compatibility selections from the repository root with
+`sh scripts/tests/registration-contract.sh` after installing the API test environment
+with `cd hindsight-api-slim && uv sync --frozen --all-extras --python 3.12 --no-python-downloads`.
+The script produces `artifacts/registration-contract/registration.xml` and
+`artifacts/registration-contract/builtins.xml` using the pinned test selections.
+It fails if either selection fails, is empty, or reports errors or skipped cases.
