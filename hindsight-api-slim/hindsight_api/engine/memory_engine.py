@@ -6522,7 +6522,13 @@ class MemoryEngine(MemoryEngineInterface):
             # - Oracle: idempotent DDL runner (no Alembic)
             logger.info("Running database migrations...")
             tenants = await self._tenant_extension.list_tenants()
-            if tenants:
+            if self._database_backend_type not in ("postgresql", "oracle"):
+                from .db.provider_migrations import run_provider_migrations
+
+                await run_provider_migrations(
+                    self._database_backend_type, self._backend, self.db_url, [tenant.schema for tenant in tenants]
+                )
+            elif tenants:
                 logger.info(f"Running migrations on {len(tenants)} schema(s)...")
                 if self._database_backend_type == "postgresql":
                     await self._run_pg_migrations(self.db_url, [tenant.schema for tenant in tenants if tenant.schema])

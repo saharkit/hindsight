@@ -1226,6 +1226,7 @@ class LLMProvider:
                 base_url=self.base_url,
                 model=self.model,
                 reasoning_effort=self.reasoning_effort,
+                timeout=self.timeout,
             )
 
         # Backward compatibility: Keep mock provider properties
